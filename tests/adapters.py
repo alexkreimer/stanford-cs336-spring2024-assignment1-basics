@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import IO, BinaryIO, Iterable, Optional, Type
+from typing import IO, BinaryIO, Iterable, Optional, Type, Dict
 
 import numpy.typing as npt
 import torch
@@ -37,13 +37,17 @@ def run_positionwise_feedforward(
         torch.FloatTensor with the output of running your position-wise feedforward network
         with the provided `weights` on the provided `in_features`.
     """
+    from rms_norm import FFN
+    ffn = FFN(d_model, d_ff)
+    ffn.load_state_dict(weights)
+    return ffn.forward(in_features)
+
     # Example:
     # If your state dict keys match, you can use `load_state_dict()`
     # my_ffn.load_state_dict(weights)
     # You can also manually assign the weights
     # my_ffn.w1.weight.data = weights["w1.weight"]
     # my_ffn.w2.weight.data = weights["w2.weight"]
-    raise NotImplementedError
 
 
 def run_scaled_dot_product_attention(
@@ -85,7 +89,9 @@ def run_scaled_dot_product_attention(
         with the output of running your scaled dot product attention
         implementation with the provided key, query, and value tensors.
     """
-    raise NotImplementedError
+    from rms_norm import Attention
+
+    return Attention(pdrop, None).forward(K, Q, V, mask)
 
 
 def run_multihead_self_attention(
@@ -135,7 +141,29 @@ def run_multihead_self_attention(
         torch.FloatTensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from rms_norm import MultiHeadSelfAttention
+    from collections import OrderedDict
+    d_key, _ = weights['k_heads.0.weight'].shape
+    d_query, _ = weights['q_heads.0.weight'].shape
+    d_value, _ = weights['v_heads.0.weight'].shape
+
+    k_heads = torch.concat([weights[f'k_heads.{head}.weight'] for head in range(num_heads)])
+    q_heads = torch.concat([weights[f'q_heads.{head}.weight'] for head in range(num_heads)])
+    v_heads = torch.concat([weights[f'v_heads.{head}.weight'] for head in range(num_heads)])
+
+    new_weights = {
+        k: v for k, v in weights.items()
+        if not (k.startswith('k_heads') or k.startswith('q_heads') or k.startswith('v_heads'))}
+
+    new_weights['k_proj.weight'] = k_heads
+    new_weights['q_proj.weight'] = q_heads
+    new_weights['v_proj.weight'] = v_heads
+
+    mha = MultiHeadSelfAttention(num_heads, d_model, d_key, d_value, d_query, attn_pdrop, None)
+    mha.load_state_dict(new_weights)
+
+    return mha.forward(in_features)
+    
 
 
 def run_transformer_block(
@@ -183,7 +211,7 @@ def run_transformer_block(
                 The rows are ordered by matrices of shape (num_heads, d_v),
                 so `attn.v_proj.weight == torch.cat([v_heads.0.weight, ..., v_heads.N.weight], dim=0)`.
             - `attn.output_proj.weight`
-                Weight of the multi-head self-attention output projection
+                Weightmof the multi-head self-attention output projection
                 Shape is (d_model, (d_model / num_heads) * num_heads).
             - `ln1.weight`
                 Weights of affine transform for the first RMSNorm
@@ -207,8 +235,11 @@ def run_transformer_block(
         FloatTensor of shape (batch_size, sequence_length, d_model) with the output of
         running the Transformer block on the input features.
     """
-    raise NotImplementedError
+    from rms_norm import TransformerBlock
 
+    transformer_block = TransformerBlock(d_model, num_heads, d_ff, attn_pdrop, residual_pdrop)
+    transformer_block.load_state_dict(weights)
+    return transformer_block(in_features)
 
 def run_transformer_lm(
     vocab_size: int,
@@ -300,7 +331,40 @@ def run_transformer_lm(
         FloatTensor of shape (batch size, sequence_length, vocab_size) with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    from rms_norm import TransformerLM
+
+    transformer_lm = TransformerLM(
+        vocab_size,
+        context_length,
+        d_model,
+        num_layers,
+        num_heads,
+        d_ff,
+        attn_pdrop,
+        residual_pdrop)
+
+    # chunk MHA weights:
+    #  input shape is (num_heads * (d_model / num_heads), d_model)
+    #  output shape is (num_heads, d_model / num_heads, d_model)
+    # keys_to_remove = []
+    # keys_to_update = []
+    # for layer in range(num_layers):
+    #     key_map = {
+    #         f'layers.{layer}.attn.q_proj.weight': [f'layers.{layer}.attn.q_proj.{head}.weight' for head in range(num_heads)],
+    #         f'layers.{layer}.attn.k_proj.weight': [f'layers.{layer}.attn.k_proj.{head}.weight' for head in range(num_heads)],
+    #         f'layers.{layer}.attn.v_proj.weight': [f'layers.{layer}.attn.v_proj.{head}.weight' for head in range(num_heads)]
+    #     }
+    #     for key_to_chunk, output_keys in key_map.items():
+    #         weight_tensor = weights[key_to_chunk]
+    #         split_weights = torch.split(weight_tensor, int(d_model / num_heads))
+    #         output_weights = dict(zip(output_keys, split_weights))
+    #         keys_to_remove.append(key_to_chunk)
+    #         keys_to_update.append(output_weights)
+    # new_weights = {k:v for k, v in weights.items() if k not in keys_to_remove}
+    # for update_dict in keys_to_update:
+    #     new_weights.update(update_dict)
+    transformer_lm.load_state_dict(weights)
+    return transformer_lm.forward(in_indices)
 
 
 def run_rmsnorm(
@@ -331,7 +395,10 @@ def run_rmsnorm(
         FloatTensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    from rms_norm import RMSNorm
+    rmsnorm = RMSNorm(d_model, eps)
+    rmsnorm.load_state_dict(weights)
+    return rmsnorm.forward(in_features)
 
 
 def run_gelu(in_features: torch.FloatTensor) -> torch.FloatTensor:
@@ -346,7 +413,8 @@ def run_gelu(in_features: torch.FloatTensor) -> torch.FloatTensor:
         FloatTensor of with the same shape as `in_features` with the output of applying
         GELU to each element.
     """
-    raise NotImplementedError
+    from rms_norm import GELU
+    return GELU().forward(in_features)
 
 
 def run_get_batch(
@@ -373,7 +441,9 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    from rms_norm import get_batch
+
+    return get_batch(dataset, batch_size, context_length, device)
 
 
 def run_softmax(in_features: torch.FloatTensor, dim: int) -> torch.FloatTensor:
@@ -390,7 +460,8 @@ def run_softmax(in_features: torch.FloatTensor, dim: int) -> torch.FloatTensor:
         FloatTensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    from rms_norm import Softmax
+    return Softmax().forward(in_features)
 
 
 def run_cross_entropy(inputs: torch.FloatTensor, targets: torch.LongTensor):
@@ -408,7 +479,9 @@ def run_cross_entropy(inputs: torch.FloatTensor, targets: torch.LongTensor):
     Returns:
         Tensor of shape () with the average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    from rms_norm import CrossEntropy
+    return CrossEntropy().forward(inputs, targets)
+
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float):
@@ -423,14 +496,17 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
     Returns:
         None
     """
-    raise NotImplementedError
+    from rms_norm import clip_gradients
+
+    return clip_gradients(parameters, max_l2_norm)
 
 
 def get_adamw_cls() -> Type[torch.optim.Optimizer]:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    from rms_norm import AdamW
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
@@ -463,7 +539,9 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    from rms_norm import cosine_schedule
+
+    return cosine_schedule(it, min_learning_rate, max_learning_rate, warmup_iters, cosine_cycle_iters)
 
 
 def run_save_checkpoint(
@@ -486,7 +564,8 @@ def run_save_checkpoint(
         out: str | os.PathLike | BinaryIO | IO[bytes]
             Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    from rms_norm import save_checkpoint
+    save_checkpoint(model, optimizer, iteration, out)
 
 
 def run_load_checkpoint(
@@ -510,7 +589,8 @@ def run_load_checkpoint(
     Returns:
         int, the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    from rms_norm import load_checkpoint
+    return load_checkpoint(src, model, optimizer)
 
 
 def get_tokenizer(
@@ -536,7 +616,8 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    from tokenizer import Tokenizer
+    return Tokenizer(vocab, merges, special_tokens)
 
 
 def run_train_bpe(
@@ -569,4 +650,22 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    import cProfile, pstats, io
+    from pstats import SortKey
+
+    from bpe_example import train_bpe
+    pr = cProfile.Profile()
+    pr.enable()
+    with open(input_path, 'r') as fd:
+        text = fd.read()
+        vocab, merges = train_bpe(text, vocab_size, special_tokens)
+    pr.disable()
+
+    s = io.StringIO()
+
+    sortby = SortKey.CUMULATIVE
+    ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
+    ps.print_stats()
+    print(s.getvalue())
+
+    return vocab, merges
