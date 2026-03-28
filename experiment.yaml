@@ -5,5 +5,11 @@ d_ff: 2048
 num_layers: 4
 num_heads: 16
 output_dir: /tmp/
-checkpoint_frequency: 1000
-
+checkpoint_frequency: 5000
+log_frequency: 200
+val_steps: 1000
+epochs: 100
+epoch_length: 10000
+learning_rate: 0.0001
+batch_size: 8
+logger: console
