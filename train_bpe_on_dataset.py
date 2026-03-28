@@ -14,23 +14,23 @@ from bpe import train_bpe, SPECIALS_BYTES, PAT_BYTES
 
 def benchmark(func, *args, name="Task"):
     print(f"--- Benchmarking {name} ---")
-    
+
     # Start tracking
     start_time = time.perf_counter()
     start_cpu = time.process_time() # Total CPU time (sum of all cores)
-    
+
     # Execute
     result = func(*args)
-    
+
     # End tracking
     end_time = time.perf_counter()
     end_cpu = time.process_time()
-    
+
     # Get peak RAM (in KB on Linux, convert to MB)
     peak_ram = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     if os.name != 'nt': # On Linux, ru_maxrss is in KB
-        pass 
-    
+        pass
+
     print(f"Wall time: {end_time - start_time:.2f} seconds")
     print(f"CPU time:  {end_cpu - start_cpu:.2f} seconds")
     print(f"Peak RAM:  {peak_ram:.2f} MB")
