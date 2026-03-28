@@ -1,51 +1,97 @@
 import os
+import mmap
 import itertools
-from typing import Iterable
-from collections.abc import Generator
-from tokenizer import Tokenizer
 import numpy as np
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
+from tokenizer import Tokenizer
 
+# Global variable for worker processes to avoid re-loading the tokenizer
+TOKENIZER = None
 
-def chunk_generator(text: str, chunk_size: int) -> Generator[str, None, None]:
-    for i in range(0, len(text), chunk_size):
-        yield text[i : i + chunk_size]
+def init_worker(vocab_path, merges_path):
+    """Initializes the tokenizer once per worker process."""
+    global TOKENIZER
+    TOKENIZER = Tokenizer.from_files(vocab_path, merges_path)
 
+def encode_chunk(chunk_bytes):
+    """Encodes a byte chunk into tokens."""
+    # Decode bytes to string; 'ignore' handles any stray bytes at boundaries
+    text_chunk = chunk_bytes.decode('utf-8', errors='ignore')
+    return TOKENIZER.encode(text_chunk)
 
-def tokenize_text(text: str, chunk_size: int, num_workers: int) -> Iterable:
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        return itertools.chain.from_iterable(tqdm(executor.map(tokenizer.encode, chunk_generator(text, chunk_size))))
+def find_chunk_offsets(file_path, chunk_size):
+    """Calculates offsets to avoid splitting UTF-8 characters or words middle-sentence."""
+    offsets = []
+    file_size = os.path.getsize(file_path)
 
-if __name__  == '__main__':
-    tokenizer = Tokenizer.from_files('tiny_stories_vocab.json', 'tiny_stories_merges.json')
+    with open(file_path, 'rb') as f:
+        start = 0
+        while start < file_size:
+            end = min(start + chunk_size, file_size)
+            if end < file_size:
+                f.seek(end)
+                # Nudge 'end' to the next whitespace to avoid splitting tokens
+                line_rest = f.readline()
+                end += len(line_rest)
+            offsets.append((start, end))
+            start = end
+    return offsets
 
-    num_workers = os.cpu_count() or 8
-    chunk_size = 100000
-    with open('data/TinyStoriesV2-GPT4-valid.txt', 'r') as fd:
-        text = fd.read()
-        text_len = len(text)
-        divisor, remainder = divmod(text_len, chunk_size)
-        num_chunks = divisor
-        if remainder > 0:
-            num_chunks += 1
-        print(f'text len is {text_len}, {num_chunks} chunks of size {chunk_size}')
+def process_file(input_path, output_path, chunk_size, num_workers, overall_bar):
+    if not os.path.exists(input_path):
+        print(f"\n[!] File not found: {input_path}")
+        overall_bar.update(1)
+        return
 
-        results = tokenize_text(text, chunk_size, num_workers)
+    # 1. Calculate smart offsets
+    offsets = find_chunk_offsets(input_path, chunk_size)
 
-        arr = np.fromiter(results, dtype='int32')
-        np.save('tokenized_tiny_stories_valid.npy', arr)
+    with open(input_path, "r+b") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
 
-    with open('data/TinyStoriesV2-GPT4-train.txt', 'r') as fd:
-        text = fd.read()
-        text_len = len(text)
-        divisor, remainder = divmod(text_len, chunk_size)
-        num_chunks = divisor
-        if remainder > 0:
-            num_chunks += 1
-        print(f'text len is {text_len}, {num_chunks} chunks of size {chunk_size}')
+            # 2. Setup the worker pool
+            with ProcessPoolExecutor(
+                max_workers=num_workers,
+                initializer=init_worker,
+                initargs=('tiny_stories_vocab.json', 'tiny_stories_merges.json')
+            ) as executor:
 
-        results = tokenize_text(text, chunk_size, num_workers)
+                # Create a generator for the chunks based on our offsets
+                chunk_gen = (mm[start:end] for start, end in offsets)
 
-        arr = np.fromiter(results, dtype='int32')
-        np.save('tokenized_tiny_stories_train.npy', arr)
+                # 3. Inner Progress Bar (Specific File)
+                results = list(tqdm(
+                    executor.map(encode_chunk, chunk_gen),
+                    total=len(offsets),
+                    desc=f" ↳ {os.path.basename(input_path)}",
+                    unit="chunk",
+                    leave=False
+                ))
+
+    # 4. Save results
+    flat_results = list(itertools.chain.from_iterable(results))
+    arr = np.array(flat_results, dtype='int32')
+    np.save(output_path, arr)
+
+    # Update main progress bar
+    overall_bar.set_postfix({"tokens": f"{len(arr)/1e6:.1f}M"})
+    overall_bar.update(1)
+
+if __name__ == '__main__':
+    # Configuration
+    NUM_WORKERS = os.cpu_count() or 8
+    CHUNK_SIZE = 1_000_000 # ~1MB per chunk
+
+    TASKS = [
+        ('data/TinyStoriesV2-GPT4-train.txt', 'tokenized_tiny_stories_train.npy'),
+        ('data/TinyStoriesV2-GPT4-valid.txt', 'tokenized_tiny_stories_valid.npy'),
+    ]
+
+    print(f"Starting Tokenization with {NUM_WORKERS} workers...")
+
+    with tqdm(total=len(TASKS), desc="Overall Progress", unit="file") as main_bar:
+        for inp, outp in TASKS:
+            process_file(inp, outp, CHUNK_SIZE, NUM_WORKERS, main_bar)
+
+    print("\nProcessing Complete.")

@@ -2,17 +2,14 @@ from typing import TypeAlias
 import regex as re
 from collections import Counter
 from collections import defaultdict
-from collections.abc import Iterator
 Token: TypeAlias = int
 
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-
-def pre_tokenize(s: str, pat: str = PAT) -> Iterator[str]:
-    return (m.group(0) for m in re.finditer(pat, s))
-
+# PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+PAT_BYTES = re.compile(br"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+SPECIALS_BYTES = re.compile(br"<\|.*?\|>")
 
 def train_bpe(
-        text: str,
+        pre_tokens_count: Counter[bytes],
         vocab_size:int,
         special_tokens: list[str]
         ) -> tuple[dict[Token, bytes], list[tuple[bytes, bytes]]]:
@@ -26,15 +23,6 @@ def train_bpe(
         _vocab_size += 1
         vocab[_vocab_size] = bytes(special_token, 'utf-8')
 
-    specials = r"<\|.*?\|>"
-    cleaned = re.sub(specials, "", text)
-
-    pre_tokens = pre_tokenize(cleaned)
-    pre_tokens_count = Counter(pre_tokens)
-    pre_tokens_count = Counter({
-        pre_token.encode('utf-8'):
-        count for pre_token, count in pre_tokens_count.items()
-    })
     merges = []
     word_list: dict[tuple[bytes, bytes], set[tuple[bytes, ...]]] = defaultdict(lambda: set())
     pair_count = defaultdict(lambda: 0)
@@ -83,7 +71,3 @@ def train_bpe(
                 pair_count[(c1, c2)] += pre_tokens_count[merged_to_original.get(word, b''.join(word))]
                 word_list[(c1, c2)].add(merged)
     return vocab, merges
-
-if __name__ == '__main__':
-    text = """low low low low low lower lower widest widest widest newest newest newest newest newest newest<|endoftext|>"""
-    train_bpe(text, 300, ['<|endoftext|>'])

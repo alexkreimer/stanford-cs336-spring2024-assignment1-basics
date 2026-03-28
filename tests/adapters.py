@@ -653,12 +653,10 @@ def run_train_bpe(
     import cProfile, pstats, io
     from pstats import SortKey
 
-    from bpe_example import train_bpe
+    from train_bpe_on_dataset import train_bpe_on_file
     pr = cProfile.Profile()
     pr.enable()
-    with open(input_path, 'r') as fd:
-        text = fd.read()
-        vocab, merges = train_bpe(text, vocab_size, special_tokens)
+    vocab, merges = train_bpe_on_file(input_path, vocab_size, special_tokens)
     pr.disable()
 
     s = io.StringIO()
