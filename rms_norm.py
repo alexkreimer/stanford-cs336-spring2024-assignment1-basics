@@ -300,13 +300,17 @@ def save_checkpoint(
 def load_checkpoint(
         src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
         model: torch.nn.Module,
-        optimizer: torch.optim.Optimizer) -> int:
-    state_dict = torch.load(src)
+        optimizer: torch.optim.Optimizer | None) -> int:
+    state_dict = torch.load(src, map_location=torch.device('cpu'))
     model.load_state_dict(state_dict['model_state_dict'])
-    optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+    if optimizer is not None:
+        optimizer.load_state_dict(state_dict['optimizer_state_dict'])
     return state_dict['iteration']
 
-# TODO
-def decode(tokenizer, model: torch.nn.Module, prompt: str, max_sequence_length: int) -> str:
-    prompt_tokens = tokenizer.encode(prompt) 
-    output = model(prompt)
+
+def decode(prompt_tokens: list[int], model: torch.nn.Module, max_sequence_length: int) -> int:
+    tokens_tensor = torch.tensor(prompt_tokens, dtype=torch.long).unsqueeze(0)
+    output = model(tokens_tensor)
+    last_token_logits = output[0, -1, :]
+    predicted_token_id = torch.argmax(last_token_logits).item()
+    return int(predicted_token_id)
